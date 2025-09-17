@@ -1329,6 +1329,7 @@ dependencies = [
     { name = "pandas" },
     { name = "pillow" },
     { name = "pynvml" },
+    { name = "pyyaml" },
     { name = "torch" },
     { name = "transformers" },
 ]
@@ -1341,6 +1342,7 @@ requires-dist = [
     { name = "pandas", specifier = ">=2.3.2" },
     { name = "pillow", specifier = ">=11.3.0" },
     { name = "pynvml", specifier = ">=13.0.1" },
+    { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "torch", specifier = ">=2.8.0" },
     { name = "transformers", specifier = ">=4.56.1" },
 ]

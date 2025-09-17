@@ -1,0 +1,18 @@
+data_generator:
+  num_docs: 100
+  image_size: [800, 500]
+  fields: ["Name", "ID", "Date"]
+  output_dir: "output/sample_docs"
+
+model:
+  name: "microsoft/layoutlmv3-base"
+  dtype: "fp32"
+
+benchmark:
+  batch_sizes: [10, 20, 30, 40, 50]
+  duration_min: 2
+  max_latency: 1.0
+  output_dir: "output"
+
+gpu_monitor:
+  interval_sec: 5
