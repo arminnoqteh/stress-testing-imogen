@@ -30,12 +30,19 @@ class T4Benchmark:
         """Process a single document and return latency"""
         try:
             start_time = time.time()
-            inputs = self.processor(document, return_tensors="pt").to("cuda")
+            # Processor may return a dict/BatchEncoding; move tensors inside to CUDA
+            inputs = self.processor(document, return_tensors="pt")
+            for k, v in inputs.items():
+                if hasattr(v, "to"):
+                    inputs[k] = v.to("cuda")
+
             with torch.no_grad():
                 outputs = self.model(**inputs)
             latency = time.time() - start_time
             return {"doc_id": doc_id, "latency": latency, "success": True}
         except Exception as e:
+            # Print error for visibility in logs
+            print(f"  Inference error for doc {doc_id}: {e}")
             return {"doc_id": doc_id, "latency": 0, "success": False, "error": str(e)}
     
     def stress_test(self, target_rpm, duration_min=2):
@@ -55,11 +62,35 @@ class T4Benchmark:
         print(f"  Inter-request interval: {inter_request_interval:.3f}s")
         
         try:
+            # Ensure model is loaded before starting the stress test
+            if self.model is None or self.processor is None:
+                try:
+                    self.load_model()
+                except Exception as e:
+                    print(f"  Failed to load model before stress test: {e}")
+                    return {
+                        "target_rpm": target_rpm,
+                        "actual_rpm": 0,
+                        "total_requests": 0,
+                        "avg_latency": 0,
+                        "p50_latency": 0,
+                        "p90_latency": 0,
+                        "p99_latency": 0,
+                        "max_latency": 0,
+                        "gpu_util": 0,
+                        "memory_used": 0,
+                        "error_count": 1,
+                        "success_rate": 0,
+                        "error": str(e)
+                    }
+
             # Create document pool
             document_pool = [create_synthetic_document() for _ in range(10)]
-            
+
             # Use ThreadPoolExecutor for concurrent processing
-            with ThreadPoolExecutor(max_workers=min(8, target_rpm // 10)) as executor:
+            # Ensure at least one worker
+            max_workers = max(1, min(8, target_rpm // 10))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 start_time = time.time()
                 
                 # Submit tasks in batches
@@ -70,10 +101,8 @@ class T4Benchmark:
                     delay = max(0, request_time - time.time())
                     
                     doc = document_pool[i % len(document_pool)]
-                    future = executor.submit(
-                        lambda d, idx: self.infer_single_document(d, idx),
-                        doc, i
-                    )
+                    # Submit the inference job directly (avoid lambda capture issues)
+                    future = executor.submit(self.infer_single_document, doc, i)
                     futures.append(future)
                     
                     if delay > 0:
@@ -81,13 +110,21 @@ class T4Benchmark:
                 
                 # Collect results
                 for future in as_completed(futures):
-                    result = future.result()
-                    if result["success"]:
-                        latencies.append(result["latency"])
-                        actual_requests += 1
-                    else:
-                        errors.append(result)
-                    
+                    try:
+                        result = future.result()
+                    except Exception as e:
+                        # Unexpected exception from the future
+                        errors.append({"doc_id": None, "latency": 0, "success": False, "error": str(e)})
+                        result = None
+
+                    if result:
+                        if result["success"]:
+                            latencies.append(result["latency"])
+                            actual_requests += 1
+                        else:
+                            errors.append(result)
+
+                    # Stop collecting once test duration has elapsed
                     if time.time() - start_time > duration_min * 60:
                         break
             
@@ -189,7 +226,7 @@ class T4Benchmark:
                 print(f"\n⚠️ P90 latency exceeded 1s at {rpm} RPM!")
                 break
             
-            if result['memory_used'] > self.gpu_info['memory_gb'] * 1024 * 0.95:
+            if self.gpu_info and result['memory_used'] > self.gpu_info['memory_gb'] * 1024 * 0.95:
                 print(f"\n⚠️ GPU memory exhausted at {rpm} RPM!")
                 break
             
@@ -297,7 +334,10 @@ if __name__ == "__main__":
         print("\n" + "="*60)
         print("BENCHMARK COMPLETE")
         print("="*60)
-        print(f"🎯 Max sustainable throughput: {df['Actual RPM'].max():.0f} RPM")
-        print(f"📊 Max GPU utilization: {df['GPU Util (%)'].max():.0f}%")
-        print(f"⚡ Min average latency: {format_time(df['Avg Latency (s)'].min())}")
-        print(f"📈 Scaling factor: 1x T4 = {df['Actual RPM'].max():.0f} RPM")
+        if df is not None:
+            print(f"🎯 Max sustainable throughput: {df['Actual RPM'].max():.0f} RPM")
+            print(f"📊 Max GPU utilization: {df['GPU Util (%)'].max():.0f}%")
+            print(f"⚡ Min average latency: {format_time(df['Avg Latency (s)'].min())}")
+            print(f"📈 Scaling factor: 1x T4 = {df['Actual RPM'].max():.0f} RPM")
+        else:
+            print("No dataframe available to summarise results.")

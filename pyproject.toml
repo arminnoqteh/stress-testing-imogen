@@ -1,0 +1,16 @@
+[project]
+name = "stress-testing-imogen"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "ipykernel>=6.30.1",
+    "matplotlib>=3.10.6",
+    "numpy>=2.3.3",
+    "pandas>=2.3.2",
+    "pillow>=11.3.0",
+    "pynvml>=13.0.1",
+    "torch>=2.8.0",
+    "transformers>=4.56.1",
+]
