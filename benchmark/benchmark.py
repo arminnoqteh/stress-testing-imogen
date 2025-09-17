@@ -2,6 +2,13 @@ import torch
 from transformers import AutoModelForDocumentQuestionAnswering, AutoProcessor
 import pynvml
 import time
+import random
+from typing import Optional
+import os
+import glob
+import json
+import argparse
+from PIL import Image
 import numpy as np
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -31,7 +38,29 @@ class T4Benchmark:
         try:
             start_time = time.time()
             # Processor may return a dict/BatchEncoding; move tensors inside to CUDA
-            inputs = self.processor(document, return_tensors="pt")
+            # For DocumentQuestionAnswering models the processor usually expects both
+            # an image and a question text so the model receives tokenized text inputs
+            # along with pixel_values. Provide a short default question to enable
+            # inference without a user-supplied question.
+            question = "What is the document title?"
+            # document may be (image, label_dict) or just image
+            if isinstance(document, (list, tuple)) and len(document) >= 1:
+                image = document[0]
+                label = document[1] if len(document) > 1 else None
+                if isinstance(label, dict) and label:
+                    # pick a random field to query
+                    key = random.choice(list(label.keys()))
+                    qmap = {
+                        "name": "What is the name?",
+                        "social_no": "What is the social number?",
+                        "father_name": "What is the father's name?",
+                        "city": "What is the city?",
+                        "province": "What is the province?"
+                    }
+                    question = qmap.get(key, f"What is {key}?")
+                inputs = self.processor(images=image, text=question, return_tensors="pt")
+            else:
+                inputs = self.processor(document, text=question, return_tensors="pt")
 
             # Recursive mover to handle nested lists/tuples/dicts of tensors
             def move_to_device(obj, device="cuda"):
@@ -65,7 +94,7 @@ class T4Benchmark:
             print(f"  Inference error for doc {doc_id}: {e}\n{tb}")
             return {"doc_id": doc_id, "latency": 0, "success": False, "error": str(e), "traceback": tb}
     
-    def stress_test(self, target_rpm, duration_min=2.0):
+    def stress_test(self, target_rpm, duration_min=2.0, document_pool: Optional[list]=None):
         """Run stress test. `duration_min` can be a float to allow short debug runs."""
         target_requests = int(target_rpm * duration_min)
         actual_requests = 0
@@ -104,8 +133,9 @@ class T4Benchmark:
                         "error": str(e)
                     }
 
-            # Create document pool
-            document_pool = [create_synthetic_document() for _ in range(10)]
+            # Create document pool (can be replaced by passing custom pool in caller)
+            if document_pool is None:
+                document_pool = [create_synthetic_document() for _ in range(10)]
 
             # Use ThreadPoolExecutor for concurrent processing
             # Ensure at least one worker
@@ -221,7 +251,7 @@ class T4Benchmark:
         finally:
             clear_gpu_memory()
     
-    def run_benchmark(self):
+    def run_benchmark(self, document_pool: Optional[list]=None):
         """Run the complete benchmark"""
         print("\n" + "="*50)
         print("T4 GPU DOCUMENT PIPELINE BENCHMARK")
@@ -242,8 +272,8 @@ class T4Benchmark:
         for rpm in test_points:
             print(f"\n{'='*20} Testing {rpm} RPM {'='*20}")
             
-            # Run stress test
-            result = self.stress_test(rpm, duration_min=2)
+            # Run stress test (pass document_pool if provided)
+            result = self.stress_test(rpm, duration_min=2, document_pool=document_pool)
             
             # Display results
             print(f"\nResults for {rpm} RPM:")
@@ -376,10 +406,38 @@ if __name__ == "__main__":
         })
         sys.exit(0)
 
+    # CLI: allow specifying a data dir and model name for Colab runs
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data-dir", type=str, default=None, help="Directory with image+json pairs to use as documents")
+    parser.add_argument("--model-name", type=str, default=None, help="Model name to load (overrides default)")
+    args = parser.parse_args()
+
+    if args.model_name:
+        benchmark.model_name = args.model_name
+
+    # If data-dir provided, build document pool from files
+    doc_pool = None
+    if args.data_dir:
+        # find JSON label files and corresponding images
+        files = sorted(glob.glob(os.path.join(args.data_dir, "*.json")))
+        pool = []
+        for jf in files:
+            try:
+                with open(jf, 'r') as f:
+                    label = json.load(f)
+                img_path = label.get('image_path') or jf.replace('.json', '.png')
+                if os.path.exists(img_path):
+                    img = Image.open(img_path).convert('RGB')
+                    pool.append((img, label))
+            except Exception:
+                continue
+        if pool:
+            doc_pool = pool
+
     benchmark.load_model()
 
-    # Run benchmark
-    results = benchmark.run_benchmark()
+    # Run benchmark (pass the doc_pool if available)
+    results = benchmark.run_benchmark(document_pool=doc_pool)
     
     # Generate report
     if results:
