@@ -32,22 +32,42 @@ class T4Benchmark:
             start_time = time.time()
             # Processor may return a dict/BatchEncoding; move tensors inside to CUDA
             inputs = self.processor(document, return_tensors="pt")
-            for k, v in inputs.items():
-                if hasattr(v, "to"):
-                    inputs[k] = v.to("cuda")
+
+            # Recursive mover to handle nested lists/tuples/dicts of tensors
+            def move_to_device(obj, device="cuda"):
+                if torch.is_tensor(obj):
+                    return obj.to(device)
+                elif isinstance(obj, dict):
+                    return {k: move_to_device(v, device) for k, v in obj.items()}
+                elif isinstance(obj, (list, tuple)):
+                    converted = [move_to_device(v, device) for v in obj]
+                    return type(obj)(converted)
+                else:
+                    return obj
+
+            inputs = move_to_device(inputs, device="cuda")
+
+            # Debug: briefly show what keys/types are being passed to the model
+            try:
+                keys_info = {k: type(v).__name__ for k, v in inputs.items()} if isinstance(inputs, dict) else type(inputs).__name__
+                print(f"  Doc {doc_id} inputs: {keys_info}")
+            except Exception:
+                pass
 
             with torch.no_grad():
                 outputs = self.model(**inputs)
             latency = time.time() - start_time
             return {"doc_id": doc_id, "latency": latency, "success": True}
         except Exception as e:
-            # Print error for visibility in logs
-            print(f"  Inference error for doc {doc_id}: {e}")
-            return {"doc_id": doc_id, "latency": 0, "success": False, "error": str(e)}
+            # Print full traceback for visibility in logs
+            import traceback
+            tb = traceback.format_exc()
+            print(f"  Inference error for doc {doc_id}: {e}\n{tb}")
+            return {"doc_id": doc_id, "latency": 0, "success": False, "error": str(e), "traceback": tb}
     
-    def stress_test(self, target_rpm, duration_min=2):
-        """Run stress test"""
-        target_requests = target_rpm * duration_min
+    def stress_test(self, target_rpm, duration_min=2.0):
+        """Run stress test. `duration_min` can be a float to allow short debug runs."""
+        target_requests = int(target_rpm * duration_min)
         actual_requests = 0
         latencies = []
         errors = []
@@ -129,6 +149,19 @@ class T4Benchmark:
                         break
             
             # Calculate statistics
+            # Debug: print submission / result summary
+            try:
+                print(f"  Submitted futures: {len(futures)} | Successes: {actual_requests} | Errors: {len(errors)}")
+                if errors:
+                    print("  Sample errors (up to 5):")
+                    for err in errors[:5]:
+                        # err may be an exception dict or object
+                        if isinstance(err, dict):
+                            print(f"    - doc_id={err.get('doc_id')} error={err.get('error')}")
+                        else:
+                            print(f"    - {err}")
+            except Exception:
+                pass
             if latencies:
                 avg_latency = np.mean(latencies)
                 p50_latency = np.percentile(latencies, 50)
@@ -321,8 +354,30 @@ if __name__ == "__main__":
     benchmark = T4Benchmark()
     
     # Load model
+    import sys
+
+    # If user passes --debug, run a quick smoke test (5 requests) and exit
+    if "--debug" in sys.argv:
+        print("Running debug smoke test (5 requests)...")
+        # ensure model loaded
+        benchmark.load_model()
+        # Run 5 synchronous inferences to quickly surface any errors
+        docs = [create_synthetic_document() for _ in range(5)]
+        dbg_results = []
+        for i, d in enumerate(docs):
+            res = benchmark.infer_single_document(d, i)
+            print(f"  Sync inference result: {res}")
+            dbg_results.append(res)
+        print("Debug results summary:")
+        print({
+            "submitted": len(dbg_results),
+            "successes": sum(1 for r in dbg_results if r.get("success")),
+            "errors": [r.get("error") for r in dbg_results if not r.get("success")]
+        })
+        sys.exit(0)
+
     benchmark.load_model()
-    
+
     # Run benchmark
     results = benchmark.run_benchmark()
     
